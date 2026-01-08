@@ -39,6 +39,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.myapplication.ui.theme.MyApplicationTheme
+import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.LatLng
+import com.google.maps.android.compose.GoogleMap
+import com.google.maps.android.compose.Marker
+import com.google.maps.android.compose.MarkerState
+import com.google.maps.android.compose.rememberCameraPositionState
+
+data class GpsPoint(
+    val latitude: Double,
+    val longitude: Double
+)
 
 class MainActivity : ComponentActivity() {
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -54,6 +65,9 @@ class MainActivity : ComponentActivity() {
     private var connectionState by mutableStateOf("Disconnected")
     private var gpsData by mutableStateOf("No data")
     private var connectedDeviceName by mutableStateOf("")
+
+    // GPS points storage
+    private val gpsPoints = mutableStateListOf<GpsPoint>()
 
     // Handler for updating UI from background thread
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -119,6 +133,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        // Debug: Check if API key is configured
+        try {
+            val appInfo = packageManager.getApplicationInfo(packageName, PackageManager.GET_META_DATA)
+            val apiKey = appInfo.metaData?.getString("com.google.android.geo.API_KEY")
+            Log.d(TAG, "Maps API Key configured: ${apiKey?.take(10)}...")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read API key from manifest", e)
+        }
+
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
 
@@ -154,6 +177,7 @@ class MainActivity : ComponentActivity() {
                         connectionState = connectionState,
                         connectedDeviceName = connectedDeviceName,
                         gpsData = gpsData,
+                        gpsPoints = gpsPoints,
                         onRequestPermissions = { requestPermissions() },
                         onStartScan = { startDiscovery() },
                         onStopScan = { stopDiscovery() },
@@ -352,6 +376,7 @@ class MainActivity : ComponentActivity() {
         connectionState = "Disconnected"
         gpsData = "No data"
         connectedDeviceName = ""
+        gpsPoints.clear()
         Log.d(TAG, "Disconnected from device")
     }
 
@@ -470,6 +495,7 @@ class MainActivity : ComponentActivity() {
                     Log.d(TAG, "Data length: ${data.length} chars")
                     mainHandler.post {
                         gpsData = data
+                        parseAndStoreGpsData(data)
                     }
                 } else {
                     Log.e(TAG, "Received null value")
@@ -494,8 +520,31 @@ class MainActivity : ComponentActivity() {
                 Log.d(TAG, "Data length: ${data.length} chars")
                 mainHandler.post {
                     gpsData = data
+                    parseAndStoreGpsData(data)
                 }
             }
+        }
+    }
+
+    private fun parseAndStoreGpsData(data: String) {
+        try {
+            val parts = data.trim().split(",")
+            if (parts.size >= 2) {
+                val latitude = parts[0].toDoubleOrNull()
+                val longitude = parts[1].toDoubleOrNull()
+
+                if (latitude != null && longitude != null) {
+                    val point = GpsPoint(latitude, longitude)
+                    gpsPoints.add(point)
+                    Log.d(TAG, "Stored GPS point: $point (total: ${gpsPoints.size})")
+                } else {
+                    Log.w(TAG, "Failed to parse GPS values: lat=$latitude, lng=$longitude")
+                }
+            } else {
+                Log.w(TAG, "GPS data has insufficient parts: ${parts.size}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing GPS data: $data", e)
         }
     }
 }
@@ -512,6 +561,7 @@ fun BluetoothTestScreen(
     connectionState: String,
     connectedDeviceName: String,
     gpsData: String,
+    gpsPoints: List<GpsPoint>,
     onRequestPermissions: () -> Unit,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
@@ -683,7 +733,7 @@ fun BluetoothTestScreen(
                                         color = Color.White.copy(alpha = 0.8f)
                                     )
 
-                                    if (parts.size >= 3) {
+                                    if (parts.size >= 2) {
                                         Text(
                                             text = "Lat: ${parts[0]}",
                                             style = MaterialTheme.typography.bodyMedium,
@@ -691,11 +741,6 @@ fun BluetoothTestScreen(
                                         )
                                         Text(
                                             text = "Lng: ${parts[1]}",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = Color.White
-                                        )
-                                        Text(
-                                            text = "Alt: ${parts[2]}m",
                                             style = MaterialTheme.typography.bodyMedium,
                                             color = Color.White
                                         )
@@ -719,6 +764,34 @@ fun BluetoothTestScreen(
                         }
                     }
                 }
+            }
+        }
+
+        // GPS Points Debug Info
+        if (connectionState != "Disconnected") {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFFE3F2FD)
+                    )
+                ) {
+                    Text(
+                        text = "GPS Points Collected: ${gpsPoints.size}",
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+            }
+        }
+
+        // GPS Map View
+        if (gpsPoints.isNotEmpty()) {
+            item {
+                GpsMapView(
+                    gpsPoints = gpsPoints,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
 
@@ -780,6 +853,90 @@ fun BluetoothTestScreen(
 
         item {
             Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+fun GpsMapView(
+    gpsPoints: List<GpsPoint>,
+    modifier: Modifier = Modifier
+) {
+    Log.d("GpsMapView", "GpsMapView called with ${gpsPoints.size} points")
+
+    if (gpsPoints.isEmpty()) {
+        Card(
+            modifier = modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(300.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "No GPS data yet",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color.Gray
+                )
+            }
+        }
+    } else {
+        // Calculate the center position based on all points
+        val centerLat = gpsPoints.map { it.latitude }.average()
+        val centerLng = gpsPoints.map { it.longitude }.average()
+
+        Log.d("GpsMapView", "Map center: lat=$centerLat, lng=$centerLng")
+        Log.d("GpsMapView", "First point: ${gpsPoints.first()}")
+        Log.d("GpsMapView", "Last point: ${gpsPoints.last()}")
+
+        val cameraPositionState = rememberCameraPositionState {
+            position = CameraPosition.fromLatLngZoom(LatLng(centerLat, centerLng), 15f)
+        }
+
+        Card(
+            modifier = modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Column {
+                Text(
+                    text = "GPS Points on Map (${gpsPoints.size} points)",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(16.dp)
+                )
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(400.dp)
+                ) {
+                    GoogleMap(
+                        modifier = Modifier.fillMaxSize(),
+                        cameraPositionState = cameraPositionState
+                    ) {
+                        gpsPoints.forEachIndexed { index, point ->
+                            Marker(
+                                state = MarkerState(position = LatLng(point.latitude, point.longitude)),
+                                title = "Point ${index + 1}",
+                                snippet = "Lat: ${String.format("%.6f", point.latitude)}, Lng: ${String.format("%.6f", point.longitude)}"
+                            )
+                        }
+                    }
+                }
+
+                // Debug info
+                Text(
+                    text = "Center: ${String.format("%.6f", centerLat)}, ${String.format("%.6f", centerLng)}",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Gray
+                )
+            }
         }
     }
 }
